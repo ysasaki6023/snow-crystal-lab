@@ -8,7 +8,10 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { modelParams, morphologyLabel, waterSatExcess, rhoSatIce } from './params.js';
 
 // ---------- 定数 ----------
-const SIM_R = 236, SIM_H = 180;   // 格子解像度 (セルを細かく)
+// モバイルは小さめの格子 (メモリ ~30MB / 成長も速い)
+const IS_MOBILE = matchMedia('(pointer: coarse)').matches || innerWidth < 760;
+const SIM_R = IS_MOBILE ? 156 : 236;
+const SIM_H = IS_MOBILE ? 132 : 180;
 const CELL_UM = 8;                 // 1 セル ≈ 8 µm (表示用スケール)
 const ui = {
   T: -15, RH: 140, P: 1013, W: 0.30, speed: 6,
@@ -17,7 +20,7 @@ const ui = {
 // ---------- Three.js シーン ----------
 const canvas = document.getElementById('view');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(devicePixelRatio, IS_MOBILE ? 1.6 : 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.02;
 
@@ -32,6 +35,7 @@ controls.autoRotate = true;
 controls.autoRotateSpeed = 0.9;
 controls.minDistance = 18;
 controls.maxDistance = 300;
+controls.enablePan = false;   // 結晶を常に中央に (タッチ操作でも迷子にならない)
 
 // 環境光 (部屋環境を PMREM で)
 {
@@ -110,7 +114,7 @@ controls.maxDistance = 300;
 // 雪の微粒子 (浮遊感)
 let dust;
 {
-  const n = 600;
+  const n = IS_MOBILE ? 280 : 600;
   const pos = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) {
     const r = 70 + Math.random() * 160;
@@ -313,7 +317,9 @@ resize();
 let targetScale = 1.0;
 function updateScale(rMax, kSpan) {
   const span = Math.max(rMax, kSpan * 0.72, 14);
-  targetScale = 22 / span;
+  // 縦長画面では横幅に合わせて縮める
+  const fit = 22 * Math.min(1, camera.aspect * 1.08);
+  targetScale = fit / span;
 }
 
 // 最新 stats からの外挿で uStep を連続的に進める (成長端の発光が滑らかに動く)
@@ -449,7 +455,20 @@ function refreshLabels() {
 
 function pushParams() {
   worker.postMessage({ type: 'setParams', params: currentParams() });
-  refreshLabels();
+  // ---------- モバイル: 折りたたみパネル ----------
+if (IS_MOBILE) {
+  const panel = document.getElementById('controls');
+  const head = document.getElementById('panel-head');
+  panel.classList.add('mobile', 'collapsed');
+  head.addEventListener('click', () => {
+    panel.classList.toggle('collapsed');
+    document.getElementById('panel-chevron').textContent =
+      panel.classList.contains('collapsed') ? '▴' : '▾';
+  });
+  document.getElementById('panel-chevron').textContent = '▴';
+}
+
+refreshLabels();
 }
 
 function bindSlider(id, key, parse = parseFloat, onChange = pushParams) {
@@ -464,7 +483,20 @@ bindSlider('s-W', 'W');
 bindSlider('s-P', 'P');
 bindSlider('s-speed', 'speed', (v) => parseInt(v), () => {
   worker.postMessage({ type: 'speed', value: ui.speed });
-  refreshLabels();
+  // ---------- モバイル: 折りたたみパネル ----------
+if (IS_MOBILE) {
+  const panel = document.getElementById('controls');
+  const head = document.getElementById('panel-head');
+  panel.classList.add('mobile', 'collapsed');
+  head.addEventListener('click', () => {
+    panel.classList.toggle('collapsed');
+    document.getElementById('panel-chevron').textContent =
+      panel.classList.contains('collapsed') ? '▴' : '▾';
+  });
+  document.getElementById('panel-chevron').textContent = '▴';
+}
+
+refreshLabels();
 });
 
 const PRESETS = {
@@ -511,6 +543,19 @@ function showToast(text) {
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), 6000);
+}
+
+// ---------- モバイル: 折りたたみパネル ----------
+if (IS_MOBILE) {
+  const panel = document.getElementById('controls');
+  const head = document.getElementById('panel-head');
+  panel.classList.add('mobile', 'collapsed');
+  head.addEventListener('click', () => {
+    panel.classList.toggle('collapsed');
+    document.getElementById('panel-chevron').textContent =
+      panel.classList.contains('collapsed') ? '▴' : '▾';
+  });
+  document.getElementById('panel-chevron').textContent = '▴';
 }
 
 refreshLabels();

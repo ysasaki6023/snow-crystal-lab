@@ -2,7 +2,10 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#02050d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>❄ 雪結晶ラボ — Snow Crystal Lab</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>❄️</text></svg>">
 <style>
@@ -108,9 +111,38 @@
   #toast.show { transform: translateX(-50%) translateY(0); }
 
   .panel { z-index: 6; }
-  @media (max-width: 760px) {
-    #controls { width: calc(100vw - 24px); right: 12px; top: auto; bottom: 12px; max-height: 46vh; }
-    #stats { bottom: auto; top: 84px; }
+  #panel-head { display: none; }
+
+  /* ---------- モバイル: ボトムシート ---------- */
+  @media (max-width: 760px), (pointer: coarse) and (max-width: 1024px) {
+    #title { top: 10px; left: 10px; padding: 8px 12px; }
+    #title h1 { font-size: 14px; }
+    #title p { display: none; }
+
+    #panel-head {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 13.5px; font-weight: 600; padding: 2px 2px 10px;
+      cursor: pointer; -webkit-tap-highlight-color: transparent;
+    }
+    #controls.mobile {
+      top: auto; right: 0; left: 0; bottom: 0; width: 100%;
+      border-radius: 18px 18px 0 0;
+      max-height: 62dvh;
+      padding: 12px 16px calc(14px + env(safe-area-inset-bottom));
+      transition: transform 0.3s ease;
+    }
+    #controls.mobile.collapsed {
+      transform: translateY(calc(100% - 44px));
+      overflow: hidden;
+    }
+    .row { margin-top: 10px; }
+    input[type="range"]::-webkit-slider-thumb { width: 22px; height: 22px; }
+
+    #stats {
+      bottom: auto; top: 56px; left: 10px;
+      font-size: 10.5px; padding: 8px 11px; gap: 2px 10px;
+    }
+    #toast { width: calc(100vw - 40px); font-size: 12px; text-align: center; }
   }
 </style>
 <script type="importmap">
@@ -131,6 +163,7 @@
 </div>
 
 <div id="controls" class="panel">
+  <div id="panel-head">⚙ パラメータ設定 <span id="panel-chevron">▾</span></div>
   <div class="row"><label>気温</label><span class="val" id="v-T"></span></div>
   <input type="range" id="s-T" min="-32" max="-0.5" step="0.1">
 
