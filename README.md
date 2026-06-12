@@ -3,7 +3,11 @@
 気温・湿度・気圧・水分量を変えると結晶の形が劇的に変わる様子を眺める
 3D 雪結晶成長シミュレータ。
 
-## 起動
+## デモ
+
+**https://ysasaki6023.github.io/snow-crystal-lab/** (GitHub Pages)
+
+## ローカル起動
 
 ```bash
 cd snow-crystal-sim
