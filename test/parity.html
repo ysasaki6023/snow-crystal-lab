@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>GPU/CPU parity</title></head>
+<body>
+<script type="module">
+import { SnowSim } from '../js/sim-core.js';
+import { modelParams } from '../js/params.js';
+import { GpuSim } from '../js/gpu-sim.js';
+
+// GPU エンジンと CPU 実装を同一条件で並走させ、付着セル集合を比較する。
+// f32 の丸め順序が CPU (f64 中間計算) と GPU (全 f32) で異なるため、
+// 完全一致ではなく「集合の一致率」「統計量の近さ」で判定する。
+window.runParity = async (R, H, T, RH, P, W, steps, checkEvery) => {
+  const params = modelParams(T, RH, P, W);
+  const cpu = new SnowSim(R, H, params);
+  const gpu = await GpuSim.create(R, H, params, {});
+  const results = [];
+  for (let done = 0; done < steps && !cpu.edge && !gpu.edge; done += checkEvery) {
+    for (let c = 0; c < checkEvery; c += 100) await gpu._runBatch(Math.min(100, checkEvery - c));
+    for (let s = 0; s < checkEvery; s++) cpu.step();
+    results.push({
+      step: gpu.step_n,
+      cpuAtt: cpu.attached, gpuAtt: gpu.attached,
+      cpuR: cpu.rMaxAtt, gpuR: gpu.rMaxAtt,
+      cpuK: cpu.kMaxAtt - cpu.kMinAtt + 1, gpuK: gpu.kMaxAtt - gpu.kMinAtt + 1,
+    });
+  }
+  let both = 0, cpuOnly = 0, gpuOnly = 0;
+  for (let i = 0; i < cpu.N; i++) {
+    const ca = cpu.a[i] !== 0, ga = gpu.aMirror[i] !== 0;
+    if (ca && ga) both++;
+    else if (ca) cpuOnly++;
+    else if (ga) gpuOnly++;
+  }
+  gpu.destroy();
+  return { results, both, cpuOnly, gpuOnly };
+};
+window.parityReady = true;
+</script>
+</body></html>

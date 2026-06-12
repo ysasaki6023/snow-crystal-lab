@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#02050d">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>❄ 雪結晶ラボ — Snow Crystal Lab</title>
@@ -70,6 +71,11 @@
     transition: background 0.15s;
   }
   .chips button:hover { background: rgba(124,196,255,0.28); }
+  .chips button.active {
+    background: rgba(124,196,255,0.38);
+    border-color: rgba(160,215,255,0.85);
+    box-shadow: 0 0 6px rgba(124,196,255,0.45);
+  }
 
   .btns { display: flex; gap: 8px; margin-top: 10px; }
   .btns button {
@@ -159,7 +165,8 @@
 
 <div id="title" class="panel">
   <h1>❄ 雪結晶ラボ <span style="font-weight:300;color:var(--text-dim)">Snow Crystal Lab</span></h1>
-  <p>気温・湿度・気圧・水分量で変わる結晶成長の 3D シミュレーション</p>
+  <p>気温・湿度・気圧・水分量で変わる結晶成長の 3D シミュレーション
+    <span id="engine-badge" style="color:var(--accent)"></span></p>
 </div>
 
 <div id="controls" class="panel">
@@ -196,6 +203,15 @@
     <div class="toggles">
       <label><input type="checkbox" id="tg-rotate" checked> 自動回転</label>
       <label><input type="checkbox" id="tg-hq"> 白い氷 (透過レンダリング)</label>
+    </div>
+  </div>
+
+  <div class="section" id="res-section">
+    <h2>計算解像度 (WebGPU)</h2>
+    <div class="chips">
+      <button data-res="high">高 R={R}</button>
+      <button data-res="ultra">超高 R={R}</button>
+      <button data-res="max">極 R={R}</button>
     </div>
   </div>
 

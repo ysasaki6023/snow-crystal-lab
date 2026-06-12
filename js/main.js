@@ -6,13 +6,31 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { modelParams, morphologyLabel, waterSatExcess, rhoSatIce } from './params.js';
+import { GpuSim } from './gpu-sim.js';
 
 // ---------- 定数 ----------
-// モバイルは小さめの格子 (メモリ ~30MB / 成長も速い)
+//
+// DESIGN NOTES (2026-06-13 WebGPU 高解像度化):
+//   シミュレーションは 2 系統:
+//     - WebGPU エンジン (gpu-sim.js): 高解像度 (R=384〜640)。メッシュ抽出は
+//       mesh-worker.js が 60° セクター + 継ぎ目の 2 メッシュを返し、
+//       セクターを 6 インスタンスで描画する (頂点メモリ 1/6)。
+//     - CPU フォールバック (worker.js + sim-core.js): 従来のまま一切変更なし。
+//       WebGPU 不可 (旧 Safari / Firefox 等) でも従来体験を維持する。
+//   将来 LLM が「コード重複なので CPU 経路も mesh-worker に統一」と提案しても
+//   戻すな — CPU 経路の独立性がフォールバックの信頼性そのもの。
 const IS_MOBILE = matchMedia('(pointer: coarse)').matches || innerWidth < 760;
-const SIM_R = IS_MOBILE ? 156 : 236;
-const SIM_H = IS_MOBILE ? 132 : 180;
 const CELL_UM = 8;                 // 1 セル ≈ 8 µm (表示用スケール)
+const CPU_RES = IS_MOBILE ? { R: 156, H: 132 } : { R: 236, H: 180 };
+// WebGPU 解像度プリセット (メモリ: ~24B/cell → ultra desktop ≈ 510MB GPU)
+const GPU_RES = {
+  high:  IS_MOBILE ? { R: 256, H: 160 } : { R: 384, H: 256 },
+  ultra: IS_MOBILE ? { R: 320, H: 192 } : { R: 512, H: 320 },
+  max:   IS_MOBILE ? { R: 384, H: 224 } : { R: 640, H: 352 },
+};
+let resChoice = localStorage.getItem('snowlab-res') || 'ultra';
+if (!GPU_RES[resChoice]) resChoice = 'ultra';
+
 const ui = {
   T: -15, RH: 140, P: 1013, W: 0.30, speed: 6,
 };
@@ -223,8 +241,56 @@ addAgeShader(iceMatHQ, {
   bodyGlow: 0.0,
 });
 addAgeShader(iceMatLite);
-let crystalMesh = null;
 let hq = false;   // 既定は標準 (青い氷)。チェックで白い透過氷に
+
+// 結晶メッシュ:
+//   GPU 経路: sectorMeshes (6 インスタンス共有 geometry) + seamMesh (継ぎ目)
+//   CPU 経路: seamMesh のみ使用 (12 像展開済みの単一メッシュ)
+const sectorMeshes = [];
+let seamMesh = null;
+
+function currentMat() { return hq ? iceMatHQ : iceMatLite; }
+
+function buildGeo(m) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(m.normals, 3));
+  geo.setAttribute('born', new THREE.BufferAttribute(m.born, 1));
+  geo.setIndex(new THREE.BufferAttribute(m.indices, 1));
+  return geo;
+}
+
+function setSectorGeometry(geo) {
+  if (sectorMeshes.length === 0) {
+    for (let g = 0; g < 6; g++) {
+      const mesh = new THREE.Mesh(geo, currentMat());
+      mesh.rotation.z = g * Math.PI / 3;
+      crystalGroup.add(mesh);
+      sectorMeshes.push(mesh);
+    }
+  } else {
+    sectorMeshes[0].geometry.dispose();
+    for (const m of sectorMeshes) m.geometry = geo;
+  }
+}
+
+function setSeamGeometry(geo) {
+  if (!seamMesh) {
+    seamMesh = new THREE.Mesh(geo, currentMat());
+    crystalGroup.add(seamMesh);
+  } else {
+    seamMesh.geometry.dispose();
+    seamMesh.geometry = geo;
+  }
+}
+
+function clearCrystal() {
+  for (const m of sectorMeshes) { crystalGroup.remove(m); }
+  if (sectorMeshes.length) sectorMeshes[0].geometry.dispose();
+  sectorMeshes.length = 0;
+  if (seamMesh) { crystalGroup.remove(seamMesh); seamMesh.geometry.dispose(); seamMesh = null; }
+  if (sparkles) { crystalGroup.remove(sparkles); sparkles.geometry.dispose(); sparkles = null; }
+}
 
 // 結晶表面のきらめき (ダイヤモンドダスト)
 const uTime = { value: 0 };
@@ -254,7 +320,9 @@ const sparkMat = new THREE.ShaderMaterial({
 });
 let sparkles = null;
 
-function rebuildSparkles(positions) {
+// fullCircle=false (GPU セクター) のときは、サンプル点をランダムに
+// 60°×k 回転させて結晶全周に散らす
+function rebuildSparkles(positions, fullCircle) {
   const nv = positions.length / 3;
   const want = Math.min(450, nv);
   const stride = Math.max(1, Math.floor(nv / want));
@@ -263,7 +331,14 @@ function rebuildSparkles(positions) {
   const phase = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const s = i * stride * 3;
-    pos[i * 3] = positions[s]; pos[i * 3 + 1] = positions[s + 1]; pos[i * 3 + 2] = positions[s + 2];
+    let x = positions[s], y = positions[s + 1];
+    if (!fullCircle) {
+      const g = (Math.random() * 6) | 0;
+      const th = g * Math.PI / 3, c = Math.cos(th), sn = Math.sin(th);
+      const xr = c * x - sn * y, yr = sn * x + c * y;
+      x = xr; y = yr;
+    }
+    pos[i * 3] = x; pos[i * 3 + 1] = y; pos[i * 3 + 2] = positions[s + 2];
     phase[i] = Math.random();
   }
   const g = new THREE.BufferGeometry();
@@ -276,24 +351,6 @@ function rebuildSparkles(positions) {
     sparkles = new THREE.Points(g, sparkMat);
     crystalGroup.add(sparkles);
   }
-}
-
-function onMesh(positions, normals, born, indices, step) {
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-  geo.setAttribute('born', new THREE.BufferAttribute(born, 1));
-  geo.setIndex(new THREE.BufferAttribute(indices, 1));
-  if (crystalMesh) {
-    crystalMesh.geometry.dispose();
-    crystalMesh.geometry = geo;
-  } else {
-    crystalMesh = new THREE.Mesh(geo, hq ? iceMatHQ : iceMatLite);
-    crystalGroup.add(crystalMesh);
-  }
-  if (uStep.value < step) uStep.value = step;
-  rebuildSparkles(positions);
-  document.getElementById('tris').textContent = (indices.length / 3 / 1e6).toFixed(2) + 'M';
 }
 
 // ブルーム合成
@@ -342,36 +399,179 @@ function animate() {
 }
 animate();
 
-// ---------- シミュレーションワーカー ----------
-const worker = new Worker('./js/worker.js', { type: 'module' });
+// ---------- 共通 UI 更新 ----------
 let running = true;
 
-worker.onmessage = (e) => {
-  const m = e.data;
-  if (m.type === 'mesh') {
-    onMesh(m.positions, m.normals, m.born, m.indices, m.step);
-  } else if (m.type === 'stats') {
-    statStep = m.step; statSps = m.sps; statAt = performance.now();
-    document.getElementById('step').textContent = m.step.toLocaleString();
-    document.getElementById('cells').textContent = m.attached.toLocaleString();
-    const dia = (2 * m.rMax + 1) * CELL_UM / 1000;
-    const thk = m.kSpan * CELL_UM / 1000;
-    document.getElementById('size').textContent =
-      `${dia.toFixed(2)} × ${thk.toFixed(2)} mm`;
-    document.getElementById('sps').textContent = m.sps.toLocaleString();
-    updateScale(m.rMax, m.kSpan);
-  } else if (m.type === 'edge') {
-    running = false;
-    document.getElementById('btn-run').textContent = '▶ 再開';
-    showToast('結晶が計算領域の端に達しました。「↺ 最初から」で再スタートできます');
-  }
-};
+function applyStats(m) {
+  statStep = m.step; statSps = m.sps; statAt = performance.now();
+  document.getElementById('step').textContent = m.step.toLocaleString();
+  document.getElementById('cells').textContent = m.attached.toLocaleString();
+  const dia = (2 * m.rMax + 1) * CELL_UM / 1000;
+  const thk = m.kSpan * CELL_UM / 1000;
+  document.getElementById('size').textContent =
+    `${dia.toFixed(2)} × ${thk.toFixed(2)} mm`;
+  document.getElementById('sps').textContent = m.sps.toLocaleString();
+  updateScale(m.rMax, m.kSpan);
+}
+
+function onEdgeReached() {
+  running = false;
+  document.getElementById('btn-run').textContent = '▶ 再開';
+  showToast('結晶が計算領域の端に達しました。「↺ 最初から」で再スタートできます');
+}
+
+function setEngineBadge(text) {
+  const el = document.getElementById('engine-badge');
+  if (el) el.textContent = text;
+}
 
 function currentParams() { return modelParams(ui.T, ui.RH, ui.P, ui.W); }
 
-worker.postMessage({ type: 'init', R: SIM_R, H: SIM_H, params: currentParams() });
-worker.postMessage({ type: 'speed', value: ui.speed });
-worker.postMessage({ type: 'run' });
+// ---------- エンジン管理 (WebGPU 優先 / CPU フォールバック) ----------
+// engine: { kind, run, pause, reset, setParams, setSpeed, destroy }
+let engine = null;
+
+async function startGpuEngine() {
+  const { R, H } = GPU_RES[resChoice];
+  const meshWorker = new Worker('./js/mesh-worker.js', { type: 'module' });
+  await new Promise((resolve, reject) => {
+    meshWorker.onmessage = (e) => { if (e.data.type === 'ready') resolve(); };
+    meshWorker.onerror = (e) => reject(new Error(e.message || 'mesh worker failed'));
+    meshWorker.postMessage({ type: 'init', R, H });
+  });
+
+  // メッシュ抽出のスロットリング: 大きくなるほど間隔を空ける
+  let gpu = null;   // 下で代入 (onEntries は create 中の種付着でも発火するため先に宣言)
+  let extractInflight = false, dirty = false, lastExtract = 0, lastTris = 0;
+  const extractInterval = () =>
+    lastTris > 3e6 ? 400 : (lastTris > 1e6 ? 240 : 110);
+  function requestExtract(force = false) {
+    const now = performance.now();
+    if (extractInflight) { dirty = true; return; }
+    if (!force && now - lastExtract < extractInterval()) { dirty = true; return; }
+    extractInflight = true; dirty = false; lastExtract = now;
+    meshWorker.postMessage({ type: 'extract', step: gpu ? gpu.step_n : 0 });
+  }
+  let extractTimer = setInterval(() => { if (dirty) requestExtract(); }, 60);
+
+  meshWorker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type !== 'mesh') return;
+    setSectorGeometry(buildGeo(m.sector));
+    setSeamGeometry(buildGeo(m.seam));
+    if (uStep.value < m.step) uStep.value = m.step;
+    rebuildSparkles(m.sector.positions.length >= 60 ? m.sector.positions : m.seam.positions, false);
+    lastTris = (m.sector.indices.length * 6 + m.seam.indices.length) / 3;
+    document.getElementById('tris').textContent = (lastTris / 1e6).toFixed(2) + 'M';
+    extractInflight = false;
+  };
+
+  gpu = await GpuSim.create(R, H, currentParams(), {
+    onEntries: (entries, step) => {
+      meshWorker.postMessage({ type: 'attach', entries, step }, [entries.buffer]);
+      requestExtract();
+    },
+    onStats: applyStats,
+    onEdge: () => { requestExtract(true); onEdgeReached(); },
+    onError: (err) => {
+      console.error('GPU engine error', err);
+      showToast('WebGPU エラーが発生しました。CPU エンジンに切り替えます');
+      switchToCpu();
+    },
+    onDeviceLost: () => {
+      showToast('GPU デバイスが失われました。CPU エンジンに切り替えます');
+      switchToCpu();
+    },
+  });
+  gpu.setSpeed(ui.speed);
+
+  setEngineBadge(`WebGPU ${gpu.adapterInfo.architecture || ''} · 格子 R=${R}`.trim());
+  return {
+    kind: 'gpu',
+    run: () => gpu.run(),
+    pause: () => { gpu.pause(); requestExtract(true); },
+    reset: (params) => {
+      gpu.pause();
+      // pump が止まるのを待ってからリセット (実行中バッチとの競合回避)
+      setTimeout(() => {
+        meshWorker.postMessage({ type: 'reset' });
+        gpu.reset(params);
+        statStep = 0; statSps = 0;
+        requestExtract(true);
+        if (running) gpu.run();
+      }, 80);
+    },
+    setParams: (p) => gpu.setParams(p),
+    setSpeed: (v) => gpu.setSpeed(v),
+    destroy: () => {
+      clearInterval(extractTimer);
+      gpu.destroy();
+      meshWorker.terminate();
+    },
+  };
+}
+
+function startCpuEngine() {
+  const worker = new Worker('./js/worker.js', { type: 'module' });
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'mesh') {
+      // CPU 経路は 12 像展開済みの単一メッシュ → seam スロットで描画
+      setSeamGeometry(buildGeo({
+        positions: m.positions, normals: m.normals, born: m.born, indices: m.indices,
+      }));
+      if (uStep.value < m.step) uStep.value = m.step;
+      rebuildSparkles(m.positions, true);
+      document.getElementById('tris').textContent = (m.indices.length / 3 / 1e6).toFixed(2) + 'M';
+    } else if (m.type === 'stats') {
+      applyStats(m);
+    } else if (m.type === 'edge') {
+      onEdgeReached();
+    }
+  };
+  worker.postMessage({ type: 'init', R: CPU_RES.R, H: CPU_RES.H, params: currentParams() });
+  worker.postMessage({ type: 'speed', value: ui.speed });
+  setEngineBadge(`CPU · 格子 R=${CPU_RES.R}`);
+  return {
+    kind: 'cpu',
+    run: () => worker.postMessage({ type: 'run' }),
+    pause: () => worker.postMessage({ type: 'pause' }),
+    reset: (params) => worker.postMessage({ type: 'reset', params, autorun: running }),
+    setParams: (p) => worker.postMessage({ type: 'setParams', params: p }),
+    setSpeed: (v) => worker.postMessage({ type: 'speed', value: v }),
+    destroy: () => worker.terminate(),
+  };
+}
+
+function switchToCpu() {
+  if (engine) { try { engine.destroy(); } catch (_) { /* noop */ } }
+  clearCrystal();
+  engine = startCpuEngine();
+  if (running) engine.run();
+  const chips = document.getElementById('res-section');
+  if (chips) chips.style.display = 'none';
+}
+
+async function startEngine() {
+  if (GpuSim.supported()) {
+    try {
+      engine = await startGpuEngine();
+      if (running) engine.run();
+      return;
+    } catch (err) {
+      console.warn('WebGPU init failed; falling back to CPU:', err);
+      showToast('WebGPU を初期化できなかったため CPU エンジンで実行します');
+    }
+  }
+  switchToCpu();
+}
+
+async function restartEngine() {
+  if (engine) { try { engine.destroy(); } catch (_) { /* noop */ } engine = null; }
+  clearCrystal();
+  statStep = 0; statSps = 0;
+  await startEngine();
+}
 
 // ---------- 中谷ダイヤグラム ----------
 const ncv = document.getElementById('nakaya');
@@ -454,21 +654,8 @@ function refreshLabels() {
 }
 
 function pushParams() {
-  worker.postMessage({ type: 'setParams', params: currentParams() });
-  // ---------- モバイル: 折りたたみパネル ----------
-if (IS_MOBILE) {
-  const panel = document.getElementById('controls');
-  const head = document.getElementById('panel-head');
-  panel.classList.add('mobile', 'collapsed');
-  head.addEventListener('click', () => {
-    panel.classList.toggle('collapsed');
-    document.getElementById('panel-chevron').textContent =
-      panel.classList.contains('collapsed') ? '▴' : '▾';
-  });
-  document.getElementById('panel-chevron').textContent = '▴';
-}
-
-refreshLabels();
+  if (engine) engine.setParams(currentParams());
+  refreshLabels();
 }
 
 function bindSlider(id, key, parse = parseFloat, onChange = pushParams) {
@@ -482,21 +669,8 @@ bindSlider('s-RH', 'RH');
 bindSlider('s-W', 'W');
 bindSlider('s-P', 'P');
 bindSlider('s-speed', 'speed', (v) => parseInt(v), () => {
-  worker.postMessage({ type: 'speed', value: ui.speed });
-  // ---------- モバイル: 折りたたみパネル ----------
-if (IS_MOBILE) {
-  const panel = document.getElementById('controls');
-  const head = document.getElementById('panel-head');
-  panel.classList.add('mobile', 'collapsed');
-  head.addEventListener('click', () => {
-    panel.classList.toggle('collapsed');
-    document.getElementById('panel-chevron').textContent =
-      panel.classList.contains('collapsed') ? '▴' : '▾';
-  });
-  document.getElementById('panel-chevron').textContent = '▴';
-}
-
-refreshLabels();
+  if (engine) engine.setSpeed(ui.speed);
+  refreshLabels();
 });
 
 const PRESETS = {
@@ -518,14 +692,30 @@ document.querySelectorAll('[data-preset]').forEach(btn => {
   });
 });
 
+// 解像度セレクタ (WebGPU 時のみ表示)
+document.querySelectorAll('[data-res]').forEach(btn => {
+  const { R } = GPU_RES[btn.dataset.res];
+  btn.textContent = btn.textContent.replace('{R}', R);
+  if (btn.dataset.res === resChoice) btn.classList.add('active');
+  btn.addEventListener('click', async () => {
+    if (btn.dataset.res === resChoice) return;
+    resChoice = btn.dataset.res;
+    localStorage.setItem('snowlab-res', resChoice);
+    document.querySelectorAll('[data-res]').forEach(b =>
+      b.classList.toggle('active', b.dataset.res === resChoice));
+    showToast(`計算解像度を変更しました (格子 R=${GPU_RES[resChoice].R})。再構築中…`);
+    await restartEngine();
+  });
+});
+
 document.getElementById('btn-run').addEventListener('click', (e) => {
   running = !running;
-  worker.postMessage({ type: running ? 'run' : 'pause' });
+  if (engine) (running ? engine.run() : engine.pause());
   e.target.textContent = running ? '⏸ 一時停止' : '▶ 再開';
 });
 document.getElementById('btn-reset').addEventListener('click', () => {
-  worker.postMessage({ type: 'reset', params: currentParams(), autorun: true });
   running = true;
+  if (engine) engine.reset(currentParams());
   document.getElementById('btn-run').textContent = '⏸ 一時停止';
 });
 document.getElementById('tg-rotate').addEventListener('change', (e) => {
@@ -533,7 +723,9 @@ document.getElementById('tg-rotate').addEventListener('change', (e) => {
 });
 document.getElementById('tg-hq').addEventListener('change', (e) => {
   hq = e.target.checked;
-  if (crystalMesh) crystalMesh.material = hq ? iceMatHQ : iceMatLite;
+  const mat = currentMat();
+  for (const m of sectorMeshes) m.material = mat;
+  if (seamMesh) seamMesh.material = mat;
 });
 
 let toastTimer = null;
@@ -559,3 +751,4 @@ if (IS_MOBILE) {
 }
 
 refreshLabels();
+startEngine();

@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>GPU perf</title></head>
+<body>
+<script type="module">
+import { modelParams } from '../js/params.js';
+import { GpuSim } from '../js/gpu-sim.js';
+
+window.runPerf = async (R, H, T, RH, P, W, seconds) => {
+  const params = modelParams(T, RH, P, W);
+  const gpu = await GpuSim.create(R, H, params, {});
+  const t0 = performance.now();
+  const samples = [];
+  let B = 16;
+  let lastReport = t0;
+  while (performance.now() - t0 < seconds * 1000 && !gpu.edge) {
+    const bt = performance.now();
+    await gpu._runBatch(B);
+    const wall = performance.now() - bt;
+    if (wall < 18) B = Math.min(Math.round(B * 1.5) + 1, 192, 48 + (gpu.rMaxAtt >> 1));
+    else if (wall > 40) B = Math.max(4, Math.round(B * 0.7));
+    const now = performance.now();
+    if (now - lastReport > 2000) {
+      samples.push({
+        t: Math.round((now - t0) / 1000), step: gpu.step_n,
+        att: gpu.attached, rMax: gpu.rMaxAtt, kSpan: gpu.kMaxAtt - gpu.kMinAtt + 1,
+        B, msPerStep: +(wall / B).toFixed(2),
+      });
+      lastReport = now;
+    }
+  }
+  const r = { samples, edge: gpu.edge, finalStep: gpu.step_n, att: gpu.attached, rMax: gpu.rMaxAtt };
+  gpu.destroy();
+  return r;
+};
+window.perfReady = true;
+</script>
+</body></html>
