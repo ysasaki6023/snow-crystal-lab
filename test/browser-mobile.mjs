@@ -11,14 +11,14 @@ await page.emulate({
 });
 const errors = [];
 page.on('pageerror', e => errors.push('PAGE: ' + e.message));
-await page.goto('http://localhost:8741/index.html', { waitUntil: 'networkidle2', timeout: 30000 });
+await page.goto('https://ysasaki6023.github.io/snow-crystal-lab/', { waitUntil: 'networkidle2', timeout: 30000 });
 const env = await page.evaluate(() => ({
   coarse: matchMedia('(pointer: coarse)').matches,
   w: innerWidth,
   collapsed: document.getElementById('controls').classList.contains('collapsed'),
 }));
 console.log('env:', JSON.stringify(env));
-await new Promise(r => setTimeout(r, 20000));
+await new Promise(r => setTimeout(r, 40000));
 const stats = await page.evaluate(() => ({
   step: document.getElementById('step')?.textContent,
   size: document.getElementById('size')?.textContent,
