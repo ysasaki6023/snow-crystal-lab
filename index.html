@@ -34,7 +34,9 @@
 
   #title {
     top: 18px; left: 20px; padding: 12px 18px;
+    transition: opacity 1.2s ease;
   }
+  #title.hidden { opacity: 0; pointer-events: none; }
   #title h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.04em; }
   #title p { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
 
@@ -207,7 +209,7 @@
   </div>
 
   <div class="section" id="res-section">
-    <h2>計算解像度 (WebGPU)</h2>
+    <h2>格子サイズ (WebGPU)</h2>
     <div class="chips">
       <button data-res="high">高 R={R}</button>
       <button data-res="ultra">超高 R={R}</button>

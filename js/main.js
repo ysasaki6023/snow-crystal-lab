@@ -750,5 +750,8 @@ if (IS_MOBILE) {
   document.getElementById('panel-chevron').textContent = '▴';
 }
 
+// タイトルはロード後数秒だけ表示してフェードアウト (画面を占有しない)
+setTimeout(() => document.getElementById('title').classList.add('hidden'), 7000);
+
 refreshLabels();
 startEngine();
